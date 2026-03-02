@@ -71,12 +71,14 @@ class UploadFileView(APIView):
                 except (ValueError, TypeError):
                     price_val = 0.0
 
-                product = Product.objects.create(
+                product, created = Product.objects.update_or_create(
                     name=item.get('name') or 'Unknown Name',
-                    description=item.get('description') or '',
-                    unit_of_measurement=item.get('unit_of_measurement') or 'unit',
-                    price=price_val,
-                    category=item.get('category') or 'Uncategorized'
+                    defaults={
+                        'description': item.get('description') or '',
+                        'unit_of_measurement': item.get('unit_of_measurement') or 'unit',
+                        'price': price_val,
+                        'category': item.get('category') or 'Uncategorized'
+                    }
                 )
                 created_products.append(ProductSerializer(product).data)
                 
