@@ -4,7 +4,7 @@ import axios from 'axios'
 import { UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle, Database, LayoutDashboard, Package, Trash2, Loader2 } from 'lucide-react'
 import './App.css'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000/api'
+const API_BASE = import.meta.env.VITE_API_BASE 
 
 function Navigation() {
   const location = useLocation();
