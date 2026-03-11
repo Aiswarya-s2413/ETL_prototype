@@ -26,7 +26,7 @@ class UploadFileView(APIView):
                 df = pd.read_csv(file_obj)
                 raw_data = df.head(100).to_csv(index=False)
             elif file_obj.name.endswith('.xlsx') or file_obj.name.endswith('.xls'):
-                df = pd.read_excel(file_obj)
+                df = pd.read_excel(file_obj, engine="openpyxl")
                 raw_data = df.head(100).to_csv(index=False)
             elif file_obj.name.endswith('.json'):
                 try:
@@ -76,7 +76,7 @@ class UploadFileView(APIView):
             }
             
             try:
-                res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true"}, timeout=120)
+                res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=120)
                 res.raise_for_status()
                 ai_text = res.json().get("response", "")
             except requests.exceptions.HTTPError as he:
