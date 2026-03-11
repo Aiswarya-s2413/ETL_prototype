@@ -69,7 +69,7 @@ class UploadFileView(APIView):
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             payload = {
-                "model": "smollm",  # We are using smollm temporarily just to prove it works
+                "model": "deepseek-r1:7b",
                 "prompt": prompt,
                 "stream": False,
                 "format": "json"
