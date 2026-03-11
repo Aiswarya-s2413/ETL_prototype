@@ -24,18 +24,33 @@ class UploadFileView(APIView):
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Parse CSV or Excel
+            # Parse CSV, Excel, or JSON
             if file_obj.name.endswith('.csv'):
                 df = pd.read_csv(file_obj)
+                raw_data = df.head(100).to_csv(index=False)
             elif file_obj.name.endswith('.xlsx') or file_obj.name.endswith('.xls'):
                 df = pd.read_excel(file_obj)
+                raw_data = df.head(100).to_csv(index=False)
+            elif file_obj.name.endswith('.json'):
+                try:
+                    data = json.load(file_obj)
+                    if isinstance(data, dict):
+                        # try to find a list inside
+                        for k, v in data.items():
+                            if isinstance(v, list):
+                                data = v
+                                break
+                    if isinstance(data, list):
+                        df = pd.DataFrame(data)
+                        raw_data = df.head(100).to_csv(index=False)
+                    else:
+                        raw_data = json.dumps(data)
+                except Exception:
+                    file_obj.seek(0)
+                    raw_content = file_obj.read().decode('utf-8', errors='ignore')
+                    raw_data = raw_content[:15000] # Provide up to 15,000 characters of the raw messy JSON
             else:
-                 return Response({"error": "Unsupported file format. Please upload CSV or Excel."}, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Sub-sample data to prevent hitting LLM context limits if the file is massive
-            # In a real app, you might chunk this
-            df_sample = df.head(100)
-            raw_data = df_sample.to_csv(index=False)
+                 return Response({"error": "Unsupported file format. Please upload CSV, Excel, or JSON."}, status=status.HTTP_400_BAD_REQUEST)
             
             prompt = f"""
             I have some unstructured raw data. Please extract the product information from this data.
@@ -67,17 +82,17 @@ class UploadFileView(APIView):
                 # Safely parse price to prevent null IntegrityError
                 raw_price = item.get('price')
                 try:
-                    price_val = float(raw_price) if raw_price is not None else 0.0
+                    price_val = abs(float(raw_price)) if raw_price is not None else 0.0
                 except (ValueError, TypeError):
                     price_val = 0.0
 
                 product, created = Product.objects.update_or_create(
                     name=item.get('name') or 'Unknown Name',
+                    category=item.get('category') or 'Uncategorized',
                     defaults={
                         'description': item.get('description') or '',
                         'unit_of_measurement': item.get('unit_of_measurement') or 'unit',
-                        'price': price_val,
-                        'category': item.get('category') or 'Uncategorized'
+                        'price': price_val
                     }
                 )
                 created_products.append(ProductSerializer(product).data)

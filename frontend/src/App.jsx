@@ -90,7 +90,7 @@ function UploadPage() {
       <div>
         <h1>Upload Unstructured Data</h1>
         <p className="upload-hint" style={{marginBottom: 0}}>
-          Upload raw CSV or Excel files. Our Gemini LLM will intelligently parse and map unstructured data to specific fields like price, category, etc.
+          Upload raw CSV, Excel, or JSON files. Our Gemini LLM will intelligently parse and map unstructured data to specific fields like price, category, etc.
         </p>
       </div>
 
@@ -103,11 +103,11 @@ function UploadPage() {
       >
         <UploadCloud className="upload-icon" />
         <div className="upload-text">Drag and drop your file here</div>
-        <div className="upload-hint">or click to browse your computer (CSV, XLSX)</div>
+        <div className="upload-hint">or click to browse your computer (CSV, XLSX, JSON)</div>
         
         <label className="label-btn">
           Select File
-          <input type="file" onChange={handleChange} title="Upload CSV or Excel" />
+          <input type="file" onChange={handleChange} title="Upload CSV, Excel, or JSON" />
         </label>
       </div>
 
