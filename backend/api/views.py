@@ -47,7 +47,7 @@ class UploadFileView(APIView):
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             created_products = []
-            chunk_size = 10  # Smaller chunks are much more reliable for LLMs to extract every row
+            chunk_size = 50  # Increased chunk size to reduce total process time and prevent timeouts
             
             print(f"--- Starting Batch Processing: {len(full_df)} rows in chunks of {chunk_size} ---")
             
@@ -59,12 +59,12 @@ class UploadFileView(APIView):
                 print(f"Processing Chunk {i//chunk_size + 1}...")
                 
                 prompt = f"""
-                You are a data extraction expert. 
-                Task: Extract EVERY product from the following CSV data.
+                You are a professional data extraction AI. 
+                Task: Extract EVERY product record from the CSV data below.
                 Rules:
-                1. You must return one object for EACH row in the data.
-                2. Return ONLY a valid JSON object with the key "products" containing an array of objects.
-                3. Fields: "name", "description", "unit_of_measurement", "price", "category".
+                1. You must return a JSON object with a key "products" which is a list.
+                2. Extract ALL rows provided. Do not summarize.
+                3. Mapping: name, description, unit_of_measurement, price, category.
                 
                 Data:
                 {chunk_csv}
@@ -78,28 +78,27 @@ class UploadFileView(APIView):
                 }
 
                 try:
-                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=120)
+                    # Increased individual timeout to 300s to let the AI "think" for larger chunks
+                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=300)
                     res.raise_for_status()
                     ai_text = res.json().get("response", "")
                     raw_parsed = json.loads(ai_text)
                     
-                    # Robust extraction of the list from the dictionary
+                    items_to_process = []
                     if isinstance(raw_parsed, dict):
                         items_to_process = raw_parsed.get("products", [])
                         if not items_to_process:
-                             # Fallback: if it returned a single dict instead of a list
                              items_to_process = [raw_parsed]
                     elif isinstance(raw_parsed, list):
                         items_to_process = raw_parsed
-                    else:
-                        items_to_process = []
 
-                    print(f"Chunk {i//chunk_size + 1}: Found {len(items_to_process)} items.")
+                    print(f"Chunk {i//chunk_size + 1}: Extracted {len(items_to_process)} items.")
 
                     for item in items_to_process:
+                        if not isinstance(item, dict): continue
+                        
                         raw_price = item.get('price')
                         try:
-                            # Clean price (remove currency symbols or commas if AI included them)
                             if isinstance(raw_price, str):
                                 raw_price = raw_price.replace('₹', '').replace('$', '').replace(',', '').strip()
                             price_val = abs(float(raw_price)) if raw_price is not None else 0.0
