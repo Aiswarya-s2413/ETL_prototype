@@ -64,8 +64,10 @@ class UploadFileView(APIView):
             """
             
             import requests
-            # Use Local Tunnel pointing to MacBook's Ollama 
-            ollama_url = "https://etl-ollama-bridge.loca.lt/api/generate"
+            # Use Local Tunnel pointing to MacBook's Ollama (like ngrok)
+            proxy_url = os.environ.get("OLLAMA_PROXY_URL", "")
+            ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
+            
             payload = {
                 "model": "smollm",  # We are using smollm temporarily just to prove it works
                 "prompt": prompt,
