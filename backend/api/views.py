@@ -1,15 +1,12 @@
 import pandas as pd
 import json
 import os
-import google.generativeai as genai
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from .models import Product
 from .serializers import ProductSerializer
-
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all()
@@ -66,14 +63,23 @@ class UploadFileView(APIView):
             {raw_data}
             """
             
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(prompt)
+            import requests
+            # Use Local Tunnel pointing to MacBook's Ollama 
+            ollama_url = "https://etl-ollama-mac.loca.lt/api/generate"
+            payload = {
+                "model": "deepseek-r1:7b", 
+                "prompt": prompt,
+                "stream": False
+            }
+            res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true"}, timeout=120)
+            res.raise_for_status()
+            ai_text = res.json().get("response", "")
             
             import re
             # Extract JSON array robustly via regex, avoiding markdown issues
-            match = re.search(r'\[.*\]', response.text, re.DOTALL)
+            match = re.search(r'\[.*\]', ai_text, re.DOTALL)
             if not match:
-                raise ValueError(f"AI returned invalid format: {response.text}")
+                raise ValueError(f"AI returned invalid format: {ai_text}")
                 
             parsed_data = json.loads(match.group(0))
             
