@@ -65,15 +65,25 @@ class UploadFileView(APIView):
             
             import requests
             # Use Local Tunnel pointing to MacBook's Ollama 
-            ollama_url = "https://etl-ollama-mac.loca.lt/api/generate"
+            ollama_url = "https://etl-ollama-bridge.loca.lt/api/generate"
             payload = {
-                "model": "deepseek-r1:7b", 
+                "model": "smollm",  # We are using smollm temporarily just to prove it works
                 "prompt": prompt,
                 "stream": False
             }
-            res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true"}, timeout=120)
-            res.raise_for_status()
-            ai_text = res.json().get("response", "")
+            
+            try:
+                res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true"}, timeout=120)
+                res.raise_for_status()
+                ai_text = res.json().get("response", "")
+            except requests.exceptions.HTTPError as he:
+                if res.status_code == 404:
+                    raise ValueError("Model not found on MacBook! Please run: ollama pull smollm")
+                elif res.status_code == 403:
+                    raise ValueError("Ollama blocked the connection! Make sure to run localtunnel with --local-host 127.0.0.1")
+                raise ValueError(f"Ollama server returned {res.status_code}: {res.text}")
+            except requests.exceptions.ConnectionError:
+                raise ValueError("Could not connect to the MacBook tunnel! Please make sure npx localtunnel is running.")
             
             import re
             # Extract JSON array robustly via regex, avoiding markdown issues
