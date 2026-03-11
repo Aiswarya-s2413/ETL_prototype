@@ -59,8 +59,10 @@ class UploadFileView(APIView):
                 print(f"Processing Chunk {i//chunk_size + 1}...")
                 
                 prompt = f"""
-                Extract product records from this CSV data.
-                You MUST return a JSON object with key "products" as a list.
+                Extract products from this CSV.
+                Return identifying data for EACH row.
+                Format: JSON array of objects inside a markdown code block.
+                Fields: name, description, unit_of_measurement, price, category.
                 Data:
                 {chunk_csv}
                 """
@@ -69,36 +71,43 @@ class UploadFileView(APIView):
                     "model": "deepseek-r1:7b",
                     "prompt": prompt,
                     "stream": False,
-                    "format": "json",
                     "options": {
-                        "num_ctx": 4096,
                         "temperature": 0.1
                     }
                 }
 
-                # Retry Mechanism: 3 attempts per chunk
                 success = False
                 for attempt in range(3):
                     try:
                         res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=300)
-                        
                         if res.status_code == 200:
                             success = True
                             break
-                        else:
-                            print(f"Ollama attempt {attempt+1} failed ({res.status_code}). Retrying in 5s...")
-                            time.sleep(5)
-                    except Exception as e:
-                        print(f"Network error on attempt {attempt+1}: {str(e)}. Retrying...")
+                        time.sleep(5)
+                    except:
                         time.sleep(5)
 
-                if not success:
-                    print(f"Skipping Chunk {i//chunk_size + 1} after 3 failed attempts.")
-                    continue
+                if not success: continue
 
                 try:
                     ai_text = res.json().get("response", "")
-                    raw_parsed = json.loads(ai_text)
+                    
+                    # Manual Extraction of JSON from Markdown block
+                    import re
+                    json_match = re.search(r'\[\s*\{.*\}\s*\]', ai_text, re.DOTALL)
+                    if not json_match:
+                        # try looking for products key
+                        json_match = re.search(r'\{.*"products".*\}', ai_text, re.DOTALL)
+                    
+                    if json_match:
+                        raw_parsed = json.loads(json_match.group(0))
+                    else:
+                        # Last ditch effort: try parsing the whole thing
+                        try:
+                            raw_parsed = json.loads(ai_text)
+                        except:
+                            print(f"Failed to find JSON in: {ai_text[:200]}")
+                            continue
                     
                     items = []
                     if isinstance(raw_parsed, dict):
@@ -119,7 +128,7 @@ class UploadFileView(APIView):
                         except (ValueError, TypeError):
                             price_val = 0.0
 
-                        product, _ = Product.objects.update_or_create(
+                        Product.objects.update_or_create(
                             name=name,
                             category=item.get('category') or item.get('dept') or 'Uncategorized',
                             defaults={
@@ -128,16 +137,14 @@ class UploadFileView(APIView):
                                 'price': price_val
                             }
                         )
-                        created_products.append(ProductSerializer(product).data)
+                        created_products.append(name)
                     
-                    print(f"Chunk {i//chunk_size + 1}: Success.")
-                    time.sleep(3) # Wait 3 seconds to let MacBook GPU rest
-
-                except Exception as parse_err:
-                    print(f"Parse error in batch: {str(parse_err)}")
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"Chunk processing error: {str(e)}")
                     continue
 
-            return Response({"message": f"Final Result: Extracted {len(created_products)} products.", "data": created_products}, status=status.HTTP_201_CREATED)
+            return Response({"message": f"Successfully extracted {len(created_products)} products!", "data": created_products}, status=status.HTTP_201_CREATED)
             
         except Exception as e:
             import traceback
