@@ -71,7 +71,8 @@ class UploadFileView(APIView):
             payload = {
                 "model": "smollm",  # We are using smollm temporarily just to prove it works
                 "prompt": prompt,
-                "stream": False
+                "stream": False,
+                "format": "json"
             }
             
             try:
@@ -87,13 +88,19 @@ class UploadFileView(APIView):
             except requests.exceptions.ConnectionError:
                 raise ValueError("Could not connect to the MacBook tunnel! Please make sure npx localtunnel is running.")
             
-            import re
-            # Extract JSON array robustly via regex, avoiding markdown issues
-            match = re.search(r'\[.*\]', ai_text, re.DOTALL)
-            if not match:
-                raise ValueError(f"AI returned invalid format: {ai_text}")
+            try:
+                parsed_data = json.loads(ai_text)
+            except json.JSONDecodeError as decode_error:
+                raise ValueError(f"AI returned unparseable text: {str(decode_error)}. Output: {ai_text[:200]}")
                 
-            parsed_data = json.loads(match.group(0))
+            if not isinstance(parsed_data, list):
+                if isinstance(parsed_data, dict):
+                     if "products" in parsed_data and isinstance(parsed_data["products"], list):
+                          parsed_data = parsed_data["products"]
+                     else:
+                          parsed_data = [parsed_data]
+                else:
+                     raise ValueError(f"AI returned invalid structured type. Output: {ai_text[:200]}")
             
             created_products = []
             for item in parsed_data:
