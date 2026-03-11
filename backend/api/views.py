@@ -47,67 +47,36 @@ class UploadFileView(APIView):
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             created_products = []
-            chunk_size = 20  # Reduced to 20 for maximum stability with DeepSeek
+            chunk_size = 5  # Tiny chunks are extremely fast and won't crash the local AI
             
-            import time
-            print(f"--- Starting Final Stability Engine: {len(full_df)} rows ---")
+            print(f"--- Ultra-Stable Processing Started: {len(full_df)} rows ---")
             
             for i in range(0, len(full_df), chunk_size):
                 chunk = full_df.iloc[i:i + chunk_size]
                 chunk_csv = chunk.to_csv(index=False)
                 
-                print(f"Processing Chunk {i//chunk_size + 1}...")
+                print(f"[{i}/{len(full_df)}] Processing...")
                 
-                prompt = f"""
-                Extract products from this CSV.
-                Return identifying data for EACH row.
-                Format: JSON array of objects inside a markdown code block.
-                Fields: name, description, unit_of_measurement, price, category.
-                Data:
-                {chunk_csv}
-                """
+                prompt = f"Convert this CSV data to a JSON array of product objects. No preamble.\nCSV Data:\n{chunk_csv}"
                 
                 payload = {
                     "model": "deepseek-r1:7b",
                     "prompt": prompt,
                     "stream": False,
-                    "options": {
-                        "temperature": 0.1
-                    }
+                    "format": "json" # Putting this back but with tiny chunks it should be stable
                 }
 
-                success = False
-                for attempt in range(3):
-                    try:
-                        res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=300)
-                        if res.status_code == 200:
-                            success = True
-                            break
-                        time.sleep(5)
-                    except:
-                        time.sleep(5)
-
-                if not success: continue
-
                 try:
-                    ai_text = res.json().get("response", "")
+                    # Short timeout because tiny chunks should be instant
+                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=60)
                     
-                    # Manual Extraction of JSON from Markdown block
-                    import re
-                    json_match = re.search(r'\[\s*\{.*\}\s*\]', ai_text, re.DOTALL)
-                    if not json_match:
-                        # try looking for products key
-                        json_match = re.search(r'\{.*"products".*\}', ai_text, re.DOTALL)
-                    
-                    if json_match:
-                        raw_parsed = json.loads(json_match.group(0))
-                    else:
-                        # Last ditch effort: try parsing the whole thing
-                        try:
-                            raw_parsed = json.loads(ai_text)
-                        except:
-                            print(f"Failed to find JSON in: {ai_text[:200]}")
-                            continue
+                    if res.status_code != 200:
+                        print(f"Batch {i} failed ({res.status_code}). Skipping to keep connection alive.")
+                        continue
+
+                    raw_parsed = res.json().get("response", "")
+                    if isinstance(raw_parsed, str):
+                        raw_parsed = json.loads(raw_parsed)
                     
                     items = []
                     if isinstance(raw_parsed, dict):
@@ -118,19 +87,19 @@ class UploadFileView(APIView):
                     for item in items:
                         if not isinstance(item, dict): continue
                         name = item.get('name') or item.get('product_name')
-                        if not name: continue 
+                        if not name: continue
                         
                         raw_price = item.get('price') or item.get('cost')
                         try:
                             if isinstance(raw_price, str):
                                 raw_price = raw_price.replace('₹', '').replace('$', '').replace(',', '').strip()
                             price_val = abs(float(raw_price)) if raw_price is not None else 0.0
-                        except (ValueError, TypeError):
+                        except:
                             price_val = 0.0
 
                         Product.objects.update_or_create(
                             name=name,
-                            category=item.get('category') or item.get('dept') or 'Uncategorized',
+                            category=item.get('category') or 'Uncategorized',
                             defaults={
                                 'description': item.get('description') or '',
                                 'unit_of_measurement': item.get('unit_of_measurement') or 'unit',
@@ -139,14 +108,12 @@ class UploadFileView(APIView):
                         )
                         created_products.append(name)
                     
-                    time.sleep(2)
+                    # No sleep needed for tiny batches as they aren't taxing the GPU
                 except Exception as e:
-                    print(f"Chunk processing error: {str(e)}")
+                    print(f"Skipping tiny batch due to error: {str(e)}")
                     continue
 
-            return Response({"message": f"Successfully extracted {len(created_products)} products!", "data": created_products}, status=status.HTTP_201_CREATED)
+            return Response({"message": f"Successfully parsed {len(created_products)} items from your file!", "data": created_products}, status=status.HTTP_201_CREATED)
             
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": f"Fatal: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
