@@ -1,7 +1,7 @@
 # config/settings.py
 
 # ── Target DB (Django's PostgreSQL) ──────────────────────────────
-DB_URL = "postgresql+psycopg2://etl_user:etl_password@localhost:5434/etl_db"
+DB_URL = "postgresql+psycopg2://etl_user:etl_password@15.135.82.154:5432/etl_db"
 
 # ── Source File Paths ─────────────────────────────────────────────
 CSV_FILE_PATH  = "sample_data/products.csv"
