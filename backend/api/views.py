@@ -24,10 +24,10 @@ class UploadFileView(APIView):
             # Parse CSV, Excel, or JSON
             if file_obj.name.endswith('.csv'):
                 df = pd.read_csv(file_obj)
-                raw_data = df.head(100).to_csv(index=False)
+                raw_data = df.head(20).to_csv(index=False)
             elif file_obj.name.endswith('.xlsx') or file_obj.name.endswith('.xls'):
                 df = pd.read_excel(file_obj, engine="openpyxl")
-                raw_data = df.head(100).to_csv(index=False)
+                raw_data = df.head(20).to_csv(index=False)
             elif file_obj.name.endswith('.json'):
                 try:
                     data = json.load(file_obj)
