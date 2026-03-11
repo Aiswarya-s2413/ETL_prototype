@@ -47,10 +47,10 @@ class UploadFileView(APIView):
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             created_products = []
-            chunk_size = 30  # Balanced chunk size for reliability
+            chunk_size = 20  # Reduced to 20 for maximum stability with DeepSeek
             
             import time
-            print(f"--- Starting Conservative Batch Processing: {len(full_df)} rows ---")
+            print(f"--- Starting Final Stability Engine: {len(full_df)} rows ---")
             
             for i in range(0, len(full_df), chunk_size):
                 chunk = full_df.iloc[i:i + chunk_size]
@@ -59,8 +59,8 @@ class UploadFileView(APIView):
                 print(f"Processing Chunk {i//chunk_size + 1}...")
                 
                 prompt = f"""
-                Extract EVERY product record from this CSV data.
-                Return ONLY a JSON object: {{"products": [{{...}}]}} 
+                Extract product records from this CSV data.
+                You MUST return a JSON object with key "products" as a list.
                 Data:
                 {chunk_csv}
                 """
@@ -72,20 +72,31 @@ class UploadFileView(APIView):
                     "format": "json",
                     "options": {
                         "num_ctx": 4096,
-                        "num_predict": 2048,
                         "temperature": 0.1
                     }
                 }
 
-                try:
-                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=300)
-                    
-                    if res.status_code != 200:
-                        print(f"Ollama Error {res.status_code}: {res.text}")
-                        # If Ollama crashes, wait 5 seconds and skip this chunk to save the rest of the file
+                # Retry Mechanism: 3 attempts per chunk
+                success = False
+                for attempt in range(3):
+                    try:
+                        res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=300)
+                        
+                        if res.status_code == 200:
+                            success = True
+                            break
+                        else:
+                            print(f"Ollama attempt {attempt+1} failed ({res.status_code}). Retrying in 5s...")
+                            time.sleep(5)
+                    except Exception as e:
+                        print(f"Network error on attempt {attempt+1}: {str(e)}. Retrying...")
                         time.sleep(5)
-                        continue
 
+                if not success:
+                    print(f"Skipping Chunk {i//chunk_size + 1} after 3 failed attempts.")
+                    continue
+
+                try:
                     ai_text = res.json().get("response", "")
                     raw_parsed = json.loads(ai_text)
                     
@@ -120,15 +131,13 @@ class UploadFileView(APIView):
                         created_products.append(ProductSerializer(product).data)
                     
                     print(f"Chunk {i//chunk_size + 1}: Success.")
-                    # Breathing room for the MacBook to avoid OOM/Crashes
-                    time.sleep(2)
+                    time.sleep(3) # Wait 3 seconds to let MacBook GPU rest
 
-                except Exception as chunk_err:
-                    print(f"Error in batch: {str(chunk_err)}")
-                    time.sleep(3)
+                except Exception as parse_err:
+                    print(f"Parse error in batch: {str(parse_err)}")
                     continue
 
-            return Response({"message": f"Successfully processed {len(full_df)} rows and extracted {len(created_products)} products!", "data": created_products}, status=status.HTTP_201_CREATED)
+            return Response({"message": f"Final Result: Extracted {len(created_products)} products.", "data": created_products}, status=status.HTTP_201_CREATED)
             
         except Exception as e:
             import traceback
