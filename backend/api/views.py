@@ -47,11 +47,11 @@ class UploadFileView(APIView):
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             created_products = []
-            chunk_size = 50  # Increased chunk size to reduce total process time and prevent timeouts
+            chunk_size = 30  # Balanced chunk size for reliability
             
-            print(f"--- Starting Batch Processing: {len(full_df)} rows in chunks of {chunk_size} ---")
+            import time
+            print(f"--- Starting Conservative Batch Processing: {len(full_df)} rows ---")
             
-            # Batch processing loop
             for i in range(0, len(full_df), chunk_size):
                 chunk = full_df.iloc[i:i + chunk_size]
                 chunk_csv = chunk.to_csv(index=False)
@@ -59,13 +59,8 @@ class UploadFileView(APIView):
                 print(f"Processing Chunk {i//chunk_size + 1}...")
                 
                 prompt = f"""
-                You are a professional data extraction AI. 
-                Task: Extract EVERY product record from the CSV data below.
-                Rules:
-                1. You must return a JSON object with a key "products" which is a list.
-                2. Extract ALL rows provided. Do not summarize.
-                3. Mapping: name, description, unit_of_measurement, price, category.
-                
+                Extract EVERY product record from this CSV data.
+                Return ONLY a JSON object: {{"products": [{{...}}]}} 
                 Data:
                 {chunk_csv}
                 """
@@ -74,30 +69,38 @@ class UploadFileView(APIView):
                     "model": "deepseek-r1:7b",
                     "prompt": prompt,
                     "stream": False,
-                    "format": "json"
+                    "format": "json",
+                    "options": {
+                        "num_ctx": 4096,
+                        "num_predict": 2048,
+                        "temperature": 0.1
+                    }
                 }
 
                 try:
-                    # Increased individual timeout to 300s to let the AI "think" for larger chunks
                     res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=300)
-                    res.raise_for_status()
+                    
+                    if res.status_code != 200:
+                        print(f"Ollama Error {res.status_code}: {res.text}")
+                        # If Ollama crashes, wait 5 seconds and skip this chunk to save the rest of the file
+                        time.sleep(5)
+                        continue
+
                     ai_text = res.json().get("response", "")
                     raw_parsed = json.loads(ai_text)
                     
-                    items_to_process = []
+                    items = []
                     if isinstance(raw_parsed, dict):
-                        items_to_process = raw_parsed.get("products", [])
-                        if not items_to_process:
-                             items_to_process = [raw_parsed]
+                        items = raw_parsed.get("products", []) or [raw_parsed]
                     elif isinstance(raw_parsed, list):
-                        items_to_process = raw_parsed
+                        items = raw_parsed
 
-                    print(f"Chunk {i//chunk_size + 1}: Extracted {len(items_to_process)} items.")
-
-                    for item in items_to_process:
+                    for item in items:
                         if not isinstance(item, dict): continue
+                        name = item.get('name') or item.get('product_name')
+                        if not name: continue 
                         
-                        raw_price = item.get('price')
+                        raw_price = item.get('price') or item.get('cost')
                         try:
                             if isinstance(raw_price, str):
                                 raw_price = raw_price.replace('₹', '').replace('$', '').replace(',', '').strip()
@@ -106,8 +109,8 @@ class UploadFileView(APIView):
                             price_val = 0.0
 
                         product, _ = Product.objects.update_or_create(
-                            name=item.get('name') or 'Unknown Name',
-                            category=item.get('category') or 'Uncategorized',
+                            name=name,
+                            category=item.get('category') or item.get('dept') or 'Uncategorized',
                             defaults={
                                 'description': item.get('description') or '',
                                 'unit_of_measurement': item.get('unit_of_measurement') or 'unit',
@@ -115,15 +118,19 @@ class UploadFileView(APIView):
                             }
                         )
                         created_products.append(ProductSerializer(product).data)
+                    
+                    print(f"Chunk {i//chunk_size + 1}: Success.")
+                    # Breathing room for the MacBook to avoid OOM/Crashes
+                    time.sleep(2)
+
                 except Exception as chunk_err:
-                    print(f"Error in Chunk {i//chunk_size + 1}: {str(chunk_err)}")
+                    print(f"Error in batch: {str(chunk_err)}")
+                    time.sleep(3)
                     continue
 
-            print(f"--- Batch Processing Complete: Total {len(created_products)} products saved ---")
             return Response({"message": f"Successfully processed {len(full_df)} rows and extracted {len(created_products)} products!", "data": created_products}, status=status.HTTP_201_CREATED)
             
         except Exception as e:
             import traceback
             traceback.print_exc()
-            error_msg = f"{type(e).__name__}: {str(e)}"
-            return Response({"error": error_msg}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
