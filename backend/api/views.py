@@ -47,9 +47,9 @@ class UploadFileView(APIView):
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             created_products = []
-            chunk_size = 5  # Tiny chunks are extremely fast and won't crash the local AI
+            chunk_size = 10  
             
-            print(f"--- Ultra-Stable Processing Started: {len(full_df)} rows ---")
+            print(f"--- Hardened Extraction Started: {len(full_df)} rows ---")
             
             for i in range(0, len(full_df), chunk_size):
                 chunk = full_df.iloc[i:i + chunk_size]
@@ -57,27 +57,47 @@ class UploadFileView(APIView):
                 
                 print(f"[{i}/{len(full_df)}] Processing...")
                 
-                prompt = f"Convert this CSV data to a JSON array of product objects. No preamble.\nCSV Data:\n{chunk_csv}"
+                # SUPPRESS THINKING: Tell the model to skip the think block for speed and stability
+                prompt = f"### System: You are a JSON generator. Do NOT use <think> blocks. Do NOT explain. Output ONLY a JSON array of objects.\n\n### Task: Extract products from this CSV data into a JSON array.\n\n### CSV Data:\n{chunk_csv}"
                 
                 payload = {
                     "model": "deepseek-r1:7b",
                     "prompt": prompt,
                     "stream": False,
-                    "format": "json" # Putting this back but with tiny chunks it should be stable
+                    "format": "json",
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 1000 # Limit output to stop runaway thinking
+                    }
                 }
 
                 try:
-                    # Short timeout because tiny chunks should be instant
-                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=60)
+                    # Timeout set to 90s per 10 rows
+                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=90)
                     
                     if res.status_code != 200:
-                        print(f"Batch {i} failed ({res.status_code}). Skipping to keep connection alive.")
+                        print(f"Ollama failure on rows {i}-{i+chunk_size}: Status {res.status_code}")
                         continue
 
-                    raw_parsed = res.json().get("response", "")
-                    if isinstance(raw_parsed, str):
-                        raw_parsed = json.loads(raw_parsed)
+                    response_json = res.json()
+                    ai_text = response_json.get("response", "")
                     
+                    # DeepSeek-R1 might still include a <think> block even if told not to
+                    # We need to strip it if it exists to get to the JSON
+                    import re
+                    ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
+                    
+                    try:
+                        raw_parsed = json.loads(ai_text)
+                    except json.JSONDecodeError:
+                        # Fallback: try to find anything that looks like a JSON array
+                        array_match = re.search(r'\[.*\]', ai_text, re.DOTALL)
+                        if array_match:
+                            raw_parsed = json.loads(array_match.group(0))
+                        else:
+                            print(f"Failed to parse AI response for batch {i}")
+                            continue
+
                     items = []
                     if isinstance(raw_parsed, dict):
                         items = raw_parsed.get("products", []) or [raw_parsed]
@@ -108,12 +128,18 @@ class UploadFileView(APIView):
                         )
                         created_products.append(name)
                     
-                    # No sleep needed for tiny batches as they aren't taxing the GPU
-                except Exception as e:
-                    print(f"Skipping tiny batch due to error: {str(e)}")
+                except Exception as inner_e:
+                    print(f"Error in batch {i}: {str(inner_e)}")
                     continue
 
-            return Response({"message": f"Successfully parsed {len(created_products)} items from your file!", "data": created_products}, status=status.HTTP_201_CREATED)
+            return Response({
+                "message": f"Extraction complete. Successfully processed {len(created_products)} items.",
+                "total_rows_attempted": len(full_df),
+                "extracted_count": len(created_products),
+                "data": created_products
+            }, status=status.HTTP_201_CREATED)
             
         except Exception as e:
-            return Response({"error": f"Fatal: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            import traceback
+            traceback.print_exc()
+            return Response({"error": f"Server Error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
