@@ -72,31 +72,34 @@ class UploadFileView(APIView):
                 }
 
                 try:
-                    # Timeout set to 90s per 10 rows
                     res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=90)
                     
                     if res.status_code != 200:
-                        print(f"Ollama failure on rows {i}-{i+chunk_size}: Status {res.status_code}")
+                        print(f"Ollama failure on rows {i}: Status {res.status_code}")
                         continue
 
-                    response_json = res.json()
-                    ai_text = response_json.get("response", "")
+                    ai_text = res.json().get("response", "")
                     
-                    # DeepSeek-R1 might still include a <think> block even if told not to
-                    # We need to strip it if it exists to get to the JSON
+                    # Robust parsing block
                     import re
-                    ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
+                    processed_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
                     
+                    raw_parsed = None
                     try:
-                        raw_parsed = json.loads(ai_text)
-                    except json.JSONDecodeError:
-                        # Fallback: try to find anything that looks like a JSON array
-                        array_match = re.search(r'\[.*\]', ai_text, re.DOTALL)
-                        if array_match:
-                            raw_parsed = json.loads(array_match.group(0))
-                        else:
-                            print(f"Failed to parse AI response for batch {i}")
-                            continue
+                        # Attempt 1: Standard JSON
+                        raw_parsed = json.loads(processed_text)
+                    except:
+                        # Attempt 2: Extract array if possible
+                        try:
+                            array_match = re.search(r'\[.*\]', processed_text, re.DOTALL)
+                            if array_match:
+                                raw_parsed = json.loads(array_match.group(0))
+                        except:
+                            pass
+
+                    if not raw_parsed:
+                        print(f"Could not extract JSON from batch {i}")
+                        continue
 
                     items = []
                     if isinstance(raw_parsed, dict):
@@ -119,10 +122,10 @@ class UploadFileView(APIView):
 
                         Product.objects.update_or_create(
                             name=name,
-                            category=item.get('category') or 'Uncategorized',
+                            category=item.get('category', 'Uncategorized'),
                             defaults={
-                                'description': item.get('description') or '',
-                                'unit_of_measurement': item.get('unit_of_measurement') or 'unit',
+                                'description': item.get('description', ''),
+                                'unit_of_measurement': item.get('unit_of_measurement', 'unit'),
                                 'price': price_val
                             }
                         )
@@ -133,9 +136,7 @@ class UploadFileView(APIView):
                     continue
 
             return Response({
-                "message": f"Extraction complete. Successfully processed {len(created_products)} items.",
-                "total_rows_attempted": len(full_df),
-                "extracted_count": len(created_products),
+                "message": f"Successfully extracted {len(created_products)} products!",
                 "data": created_products
             }, status=status.HTTP_201_CREATED)
             
