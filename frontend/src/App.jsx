@@ -75,7 +75,7 @@ function UploadPage() {
     try {
       const res = await axios.post(`${API_BASE}/upload/`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 600000 // 10 minutes
+        timeout: 1800000 // 30 minute timeout for large files
       });
       showToast(`Successfully extracted ${res.data.data.length} products!`);
       setFile(null);

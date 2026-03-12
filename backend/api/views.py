@@ -42,24 +42,32 @@ class UploadFileView(APIView):
             else:
                  return Response({"error": "Unsupported file format."}, status=status.HTTP_400_BAD_REQUEST)
 
+            from django.db import connection
             import requests
+
             proxy_url = os.environ.get("OLLAMA_PROXY_URL", "")
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             created_products = []
-            chunk_size = 10  # Back to local deepseek chunks
+            chunk_size = 5  # Smaller batches = frequent database commits = higher stability
+            total_rows = len(full_df)
             
-            print(f"--- Local AI Engine (DeepSeek) Started: {len(full_df)} rows ---")
+            print(f"=== UPLOAD START: {total_rows} rows | Batches of {chunk_size} ===")
             
-            for i in range(0, len(full_df), chunk_size):
+            for i in range(0, total_rows, chunk_size):
+                # Close DB connection before a long-running AI task to prevent "server closed connection" errors
+                connection.close() 
+                
                 chunk = full_df.iloc[i:i + chunk_size]
                 chunk_csv = chunk.to_csv(index=False)
                 
-                print(f"[{i}/{len(full_df)}] Processing batch...")
+                percent = round((i / total_rows) * 100)
+                print(f"[{percent}%] Processing rows {i} to {min(i+chunk_size, total_rows)}...")
                 
                 prompt = (
-                    "### Task: Extract products from this CSV into a JSON array.\n"
-                    "### Rules: Return ONLY valid JSON. No explanations. No <think> blocks.\n"
+                    "### Task: Convert CSV to JSON array of product objects.\n"
+                    "### Schema: [{\"name\":\"...\",\"description\":\"...\",\"unit_of_measurement\":\"...\",\"price\":0.0,\"category\":\"...\"}]\n"
+                    "### Rules: NO preamble. NO thinking blocks. ONLY the JSON list.\n"
                     f"### Data:\n{chunk_csv}"
                 )
                 
@@ -68,42 +76,39 @@ class UploadFileView(APIView):
                     "prompt": prompt,
                     "stream": False,
                     "format": "json",
-                    "options": {
-                        "temperature": 0.1,
-                        "num_predict": 1000
-                    }
+                    "options": {"temperature": 0.1, "num_predict": 1000}
                 }
 
                 try:
-                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=120)
+                    # 5 rows should never take more than 90 seconds
+                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=90)
                     
                     if res.status_code != 200:
-                        print(f"Batch {i} failed with status {res.status_code}")
+                        print(f"   ! Error: AI Batch {i} failed (Status {res.status_code})")
                         continue
 
                     ai_text = res.json().get("response", "")
                     
-                    # Manual strip of <think> tags for stability
+                    # Clean the response
                     import re
                     ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
                     
                     try:
                         raw_parsed = json.loads(ai_text)
                     except:
-                        array_match = re.search(r'\[.*\]', ai_text, re.DOTALL)
-                        if array_match:
-                            raw_parsed = json.loads(array_match.group(0))
+                        match = re.search(r'\[.*\]', ai_text, re.DOTALL)
+                        if match: raw_parsed = json.loads(match.group(0))
                         else: continue
 
                     items = raw_parsed if isinstance(raw_parsed, list) else raw_parsed.get("products", [])
                     if not isinstance(items, list): items = [items]
 
+                    # Open connection for the DB write
                     for item in items:
                         if not isinstance(item, dict): continue
-                        name = str(item.get('name') or 'Unnamed')[:250]
+                        name_val = str(item.get('name') or 'Unnamed')[:250]
                         
                         try:
-                            # Clean price logic
                             price_raw = item.get('price')
                             if isinstance(price_raw, str):
                                 price_raw = price_raw.replace('₹', '').replace('$', '').replace(',', '').strip()
@@ -112,7 +117,7 @@ class UploadFileView(APIView):
                             price_val = 0.0
 
                         Product.objects.update_or_create(
-                            name=name,
+                            name=name_val,
                             defaults={
                                 'description': str(item.get('description', ''))[:1000],
                                 'unit_of_measurement': str(item.get('unit_of_measurement', 'unit'))[:50],
@@ -120,20 +125,27 @@ class UploadFileView(APIView):
                                 'category': str(item.get('category', 'Uncategorized'))[:200],
                             }
                         )
-                        created_products.append(name)
+                        created_products.append(name_val)
+                    
+                    print(f"   ✓ Batch saved. Total so far: {len(created_products)}")
                         
                 except Exception as e:
-                    print(f"Batch {i} network error: {str(e)}")
+                    print(f"   ! Batch failed: {str(e)}")
                     continue
 
-            return Response({
-                "message": f"Successfully processed {len(created_products)} products using local DeepSeek!",
+            print(f"=== UPLOAD COMPLETE: {len(created_products)} products saved ===")
+            
+            final_resp = Response({
+                "message": f"Successfully processed {len(created_products)} rows!",
                 "data": created_products
             }, status=status.HTTP_201_CREATED)
+            
+            final_resp["Access-Control-Allow-Origin"] = "*"
+            return final_resp
             
         except Exception as e:
             import traceback
             traceback.print_exc()
-            err_resp = Response({"error": f"Server Error: {str(e)}"}, status=500)
+            err_resp = Response({"error": f"Fatal Crash: {str(e)}"}, status=500)
             err_resp["Access-Control-Allow-Origin"] = "*"
             return err_resp
