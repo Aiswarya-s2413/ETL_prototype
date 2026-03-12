@@ -67,7 +67,6 @@ def process_file_background(full_df):
                     "model": "deepseek-r1:7b",
                     "prompt": prompt,
                     "stream": False,
-                    "format": "json",
                     "options": {"temperature": 0.1, "num_predict": 1000}
                 }
 
