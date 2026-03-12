@@ -79,15 +79,24 @@ def process_file_background(full_df):
                 
                 items = []
                 try:
-                    # Try standard JSON parsing first
+                    # Ask the standard parser to attempt reading the json
                     raw_parsed = json.loads(ai_text)
-                    items = raw_parsed if isinstance(raw_parsed, list) else raw_parsed.get("products", [])
-                    if not isinstance(items, list): items = [items]
+                    if isinstance(raw_parsed, list):
+                        items = raw_parsed
+                    elif isinstance(raw_parsed, dict):
+                        # Some models return {"products": [...]} while others just return a single item {...}
+                        if "products" in raw_parsed and isinstance(raw_parsed["products"], list):
+                            items = raw_parsed["products"]
+                        else:
+                            items = [raw_parsed] # It just returned one product as a dict!
                 except Exception:
                     # ROBUST FALLBACK: Rip out every single {...} object manually
                     for block in re.finditer(r'\{[^{}]+\}', ai_text):
                         try:
-                            items.append(json.loads(block.group(0)))
+                            parsed_block = json.loads(block.group(0))
+                            # Ignore empty or generic wrapper dicts
+                            if parsed_block and "name" in parsed_block or "price" in parsed_block:
+                                items.append(parsed_block)
                         except: pass
 
                 for item in items:
