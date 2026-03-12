@@ -12,8 +12,122 @@ class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all()
     serializer_class = ProductSerializer
 
+STATUS_FILE = "/tmp/etl_status.json"
+
+def write_status(state):
+    import json
+    with open(STATUS_FILE, "w") as f:
+        json.dump(state, f)
+
+def get_status():
+    import json
+    import os
+    if not os.path.exists(STATUS_FILE):
+        return {"status": "idle"}
+    with open(STATUS_FILE, "r") as f:
+        return json.load(f)
+
+def process_file_background(full_df):
+    from django.db import connection
+    import requests
+    import os
+    import json
+    import re
+    from api.models import Product
+
+    try:
+        proxy_url = os.environ.get("OLLAMA_PROXY_URL", "")
+        ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
+        
+        created_products = []
+        chunk_size = 5
+        total_rows = len(full_df)
+        
+        write_status({"status": "processing", "progress": 0, "total": total_rows, "extracted_count": 0})
+        print(f"=== UPLOAD START: {total_rows} rows ===")
+
+        for i in range(0, total_rows, chunk_size):
+            try:
+                connection.close() 
+                chunk = full_df.iloc[i:i + chunk_size]
+                chunk_csv = chunk.to_csv(index=False)
+                
+                percent = round((i / total_rows) * 100)
+                write_status({"status": "processing", "progress": percent, "total": total_rows, "extracted_count": len(created_products)})
+                
+                prompt = (
+                    "### Task: Convert CSV to JSON array of product objects.\n"
+                    "### Schema: [{\"name\":\"...\",\"description\":\"...\",\"unit_of_measurement\":\"...\",\"price\":0.0,\"category\":\"...\"}]\n"
+                    "### Rules: NO preamble. NO thinking blocks. ONLY the JSON list.\n"
+                    f"### Data:\n{chunk_csv}"
+                )
+                
+                payload = {
+                    "model": "deepseek-r1:7b",
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.1, "num_predict": 1000}
+                }
+
+                res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=90)
+                if res.status_code != 200: continue
+
+                ai_text = res.json().get("response", "")
+                ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
+                
+                try:
+                    raw_parsed = json.loads(ai_text)
+                except:
+                    match = re.search(r'\[.*\]', ai_text, re.DOTALL)
+                    if match: raw_parsed = json.loads(match.group(0))
+                    else: continue
+
+                items = raw_parsed if isinstance(raw_parsed, list) else raw_parsed.get("products", [])
+                if not isinstance(items, list): items = [items]
+
+                for item in items:
+                    if not isinstance(item, dict): continue
+                    name_val = str(item.get('name') or 'Unnamed')[:250]
+                    
+                    try:
+                        price_raw = item.get('price')
+                        if isinstance(price_raw, str):
+                            price_raw = price_raw.replace('₹', '').replace('$', '').replace(',', '').strip()
+                        price_val = float(price_raw) if price_raw else 0.0
+                    except:
+                        price_val = 0.0
+
+                    Product.objects.update_or_create(
+                        name=name_val,
+                        defaults={
+                            'description': str(item.get('description', ''))[:1000],
+                            'unit_of_measurement': str(item.get('unit_of_measurement', 'unit'))[:50],
+                            'price': price_val,
+                            'category': str(item.get('category', 'Uncategorized'))[:200],
+                        }
+                    )
+                    created_products.append(name_val)
+                    
+            except Exception as e:
+                print(f"Batch failed: {str(e)}")
+                continue
+
+        write_status({"status": "completed", "progress": 100, "total": total_rows, "extracted_count": len(created_products)})
+        print(f"=== UPLOAD COMPLETE: {len(created_products)} products saved ===")
+
+    except Exception as e:
+        write_status({"status": "error", "error": f"Fatal Crash: {str(e)}"})
+        print(f"Fatal crash inside worker: {str(e)}")
+
+
 class UploadFileView(APIView):
     parser_classes = (MultiPartParser, FormParser)
+
+    def get(self, request, *args, **kwargs):
+        resp = Response(get_status(), status=status.HTTP_200_OK)
+        resp["Access-Control-Allow-Origin"] = "*"
+        return resp
 
     def post(self, request, *args, **kwargs):
         file_obj = request.FILES.get('file')
@@ -21,7 +135,7 @@ class UploadFileView(APIView):
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Determine DataFrame and process in batches of 20
+            # Determine DataFrame
             if file_obj.name.endswith('.csv'):
                 full_df = pd.read_csv(file_obj)
             elif file_obj.name.endswith('.xlsx') or file_obj.name.endswith('.xls'):
@@ -42,103 +156,22 @@ class UploadFileView(APIView):
             else:
                  return Response({"error": "Unsupported file format."}, status=status.HTTP_400_BAD_REQUEST)
 
-            from django.db import connection
-            import requests
-
-            proxy_url = os.environ.get("OLLAMA_PROXY_URL", "")
-            ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
+            import threading
+            # Start background processing thread
+            # Avoid resetting if already running
+            curr_status = get_status()
+            if curr_status.get("status") == "processing":
+                 return Response({"error": "An extraction is already running. Please wait."}, status=status.HTTP_409_CONFLICT)
+                 
+            write_status({"status": "processing", "progress": 0, "total": len(full_df), "extracted_count": 0})
             
-            created_products = []
-            chunk_size = 5  # Smaller batches = frequent database commits = higher stability
-            total_rows = len(full_df)
-            
-            print(f"=== UPLOAD START: {total_rows} rows | Batches of {chunk_size} ===")
-            
-            for i in range(0, total_rows, chunk_size):
-                # Close DB connection before a long-running AI task to prevent "server closed connection" errors
-                connection.close() 
-                
-                chunk = full_df.iloc[i:i + chunk_size]
-                chunk_csv = chunk.to_csv(index=False)
-                
-                percent = round((i / total_rows) * 100)
-                print(f"[{percent}%] Processing rows {i} to {min(i+chunk_size, total_rows)}...")
-                
-                prompt = (
-                    "### Task: Convert CSV to JSON array of product objects.\n"
-                    "### Schema: [{\"name\":\"...\",\"description\":\"...\",\"unit_of_measurement\":\"...\",\"price\":0.0,\"category\":\"...\"}]\n"
-                    "### Rules: NO preamble. NO thinking blocks. ONLY the JSON list.\n"
-                    f"### Data:\n{chunk_csv}"
-                )
-                
-                payload = {
-                    "model": "deepseek-r1:7b",
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {"temperature": 0.1, "num_predict": 1000}
-                }
+            thread = threading.Thread(target=process_file_background, args=(full_df,))
+            thread.daemon = True
+            thread.start()
 
-                try:
-                    # 5 rows should never take more than 90 seconds
-                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=90)
-                    
-                    if res.status_code != 200:
-                        print(f"   ! Error: AI Batch {i} failed (Status {res.status_code})")
-                        continue
-
-                    ai_text = res.json().get("response", "")
-                    
-                    # Clean the response
-                    import re
-                    ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
-                    
-                    try:
-                        raw_parsed = json.loads(ai_text)
-                    except:
-                        match = re.search(r'\[.*\]', ai_text, re.DOTALL)
-                        if match: raw_parsed = json.loads(match.group(0))
-                        else: continue
-
-                    items = raw_parsed if isinstance(raw_parsed, list) else raw_parsed.get("products", [])
-                    if not isinstance(items, list): items = [items]
-
-                    # Open connection for the DB write
-                    for item in items:
-                        if not isinstance(item, dict): continue
-                        name_val = str(item.get('name') or 'Unnamed')[:250]
-                        
-                        try:
-                            price_raw = item.get('price')
-                            if isinstance(price_raw, str):
-                                price_raw = price_raw.replace('₹', '').replace('$', '').replace(',', '').strip()
-                            price_val = float(price_raw) if price_raw else 0.0
-                        except:
-                            price_val = 0.0
-
-                        Product.objects.update_or_create(
-                            name=name_val,
-                            defaults={
-                                'description': str(item.get('description', ''))[:1000],
-                                'unit_of_measurement': str(item.get('unit_of_measurement', 'unit'))[:50],
-                                'price': price_val,
-                                'category': str(item.get('category', 'Uncategorized'))[:200],
-                            }
-                        )
-                        created_products.append(name_val)
-                    
-                    print(f"   ✓ Batch saved. Total so far: {len(created_products)}")
-                        
-                except Exception as e:
-                    print(f"   ! Batch failed: {str(e)}")
-                    continue
-
-            print(f"=== UPLOAD COMPLETE: {len(created_products)} products saved ===")
-            
             final_resp = Response({
-                "message": f"Successfully processed {len(created_products)} rows!",
-                "data": created_products
-            }, status=status.HTTP_201_CREATED)
+                "message": "File uploaded! Processing started in the background."
+            }, status=status.HTTP_202_ACCEPTED)
             
             final_resp["Access-Control-Allow-Origin"] = "*"
             return final_resp

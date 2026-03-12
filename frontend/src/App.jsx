@@ -32,6 +32,7 @@ function UploadPage() {
   const [file, setFile] = useState(null)
   const [dragActive, setDragActive] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [progress, setProgress] = useState(0)
   const [toast, setToast] = useState(null)
 
   const handleDrag = (e) => {
@@ -68,6 +69,7 @@ function UploadPage() {
   const handleUpload = async () => {
     if (!file) return;
     setLoading(true);
+    setProgress(0);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -75,13 +77,41 @@ function UploadPage() {
     try {
       const res = await axios.post(`${API_BASE}/upload/`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 1800000 // 30 minute timeout for large files
+        timeout: 1800000 
       });
-      showToast(`Successfully extracted ${res.data.data.length} products!`);
-      setFile(null);
+      
+      if (res.status === 202) {
+        showToast("AI Job started! Polling status...");
+        
+        const poll = setInterval(async () => {
+            try {
+                const stat = await axios.get(`${API_BASE}/upload/`);
+                if (stat.data.status === 'processing') {
+                    setProgress(stat.data.progress || 0);
+                } else if (stat.data.status === 'completed') {
+                    clearInterval(poll);
+                    showToast(`Success! Extracted ${stat.data.extracted_count} products.`);
+                    setFile(null);
+                    setLoading(false);
+                    setProgress(0);
+                } else if (stat.data.status === 'error') {
+                    clearInterval(poll);
+                    showToast(`Error: ${stat.data.error}`, 'error');
+                    setLoading(false);
+                    setProgress(0);
+                }
+            } catch (e) {
+                console.error("Polling error", e);
+            }
+        }, 3000);
+
+      } else {
+        showToast(`Successfully extracted ${res.data.data?.length || 0} products!`);
+        setFile(null);
+        setLoading(false);
+      }
     } catch (err) {
       showToast(err.response?.data?.error || 'Failed to process file', 'error');
-    } finally {
       setLoading(false);
     }
   }
