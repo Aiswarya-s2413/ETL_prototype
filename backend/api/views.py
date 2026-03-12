@@ -40,12 +40,13 @@ def process_file_background(full_df):
         ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
         
         created_products = []
-        chunk_size = 5
+        chunk_size = 2  # Ultra-small chunks so DeepSeek doesn't skip ANY rows
         total_rows = len(full_df)
         
         write_status({"status": "processing", "progress": 0, "total": total_rows, "extracted_count": 0})
         print(f"=== UPLOAD START: {total_rows} rows ===")
 
+        import uuid
         for i in range(0, total_rows, chunk_size):
             try:
                 connection.close() 
@@ -76,19 +77,27 @@ def process_file_background(full_df):
                 ai_text = res.json().get("response", "")
                 ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
                 
+                items = []
                 try:
+                    # Try standard JSON parsing first
                     raw_parsed = json.loads(ai_text)
-                except:
-                    match = re.search(r'\[.*\]', ai_text, re.DOTALL)
-                    if match: raw_parsed = json.loads(match.group(0))
-                    else: continue
-
-                items = raw_parsed if isinstance(raw_parsed, list) else raw_parsed.get("products", [])
-                if not isinstance(items, list): items = [items]
+                    items = raw_parsed if isinstance(raw_parsed, list) else raw_parsed.get("products", [])
+                    if not isinstance(items, list): items = [items]
+                except Exception:
+                    # ROBUST FALLBACK: Rip out every single {...} object manually
+                    for block in re.finditer(r'\{[^{}]+\}', ai_text):
+                        try:
+                            items.append(json.loads(block.group(0)))
+                        except: pass
 
                 for item in items:
                     if not isinstance(item, dict): continue
-                    name_val = str(item.get('name') or 'Unnamed')[:250]
+                    
+                    raw_name = str(item.get('name') or item.get('product_name') or '').strip()
+                    if not raw_name or raw_name.lower() in ['unnamed', 'unknown', 'null']:
+                        name_val = f"Unnamed Product {uuid.uuid4().hex[:6]}"
+                    else:
+                        name_val = raw_name[:250]
                     
                     try:
                         price_raw = item.get('price')
