@@ -47,18 +47,21 @@ class UploadFileView(APIView):
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
             
             created_products = []
-            chunk_size = 10  
+            chunk_size = 20  # 20 rows per chunk is the sweet spot for speed vs accuracy
             
-            print(f"--- Hardened Extraction Started: {len(full_df)} rows ---")
+            print(f"--- Hardened System: Processing {len(full_df)} rows in batches of {chunk_size} ---")
             
             for i in range(0, len(full_df), chunk_size):
                 chunk = full_df.iloc[i:i + chunk_size]
                 chunk_csv = chunk.to_csv(index=False)
                 
-                print(f"[{i}/{len(full_df)}] Processing...")
-                
-                # SUPPRESS THINKING: Tell the model to skip the think block for speed and stability
-                prompt = f"### System: You are a JSON generator. Do NOT use <think> blocks. Do NOT explain. Output ONLY a JSON array of objects.\n\n### Task: Extract products from this CSV data into a JSON array.\n\n### CSV Data:\n{chunk_csv}"
+                # Faster, more direct prompt to prevent AI runaway thinking
+                prompt = (
+                    "### Task: Convert CSV to JSON array of product objects.\n"
+                    "### Format: [{\"name\": \"...\", \"description\": \"...\", \"unit_of_measurement\": \"...\", \"price\": 0.0, \"category\": \"...\"}]\n"
+                    "### Rules: NO explanations. NO <think> tags. ONLY JSON.\n"
+                    f"### CSV Data:\n{chunk_csv}"
+                )
                 
                 payload = {
                     "model": "deepseek-r1:7b",
@@ -66,81 +69,83 @@ class UploadFileView(APIView):
                     "stream": False,
                     "format": "json",
                     "options": {
-                        "temperature": 0.1,
-                        "num_predict": 1000 # Limit output to stop runaway thinking
+                        "temperature": 0.0,
+                        "num_predict": 2000
                     }
                 }
 
                 try:
-                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=90)
+                    res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=120)
                     
                     if res.status_code != 200:
-                        print(f"Ollama failure on rows {i}: Status {res.status_code}")
+                        print(f"Batch {i}: Ollama Error {res.status_code}")
                         continue
 
                     ai_text = res.json().get("response", "")
                     
-                    # Robust parsing block
+                    # Strip any accidental thinking blocks
                     import re
-                    processed_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
+                    ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
                     
-                    raw_parsed = None
                     try:
-                        # Attempt 1: Standard JSON
-                        raw_parsed = json.loads(processed_text)
+                        raw_parsed = json.loads(ai_text)
                     except:
-                        # Attempt 2: Extract array if possible
-                        try:
-                            array_match = re.search(r'\[.*\]', processed_text, re.DOTALL)
-                            if array_match:
-                                raw_parsed = json.loads(array_match.group(0))
-                        except:
-                            pass
+                        array_match = re.search(r'\[.*\]', ai_text, re.DOTALL)
+                        if array_match:
+                            raw_parsed = json.loads(array_match.group(0))
+                        else: continue
 
-                    if not raw_parsed:
-                        print(f"Could not extract JSON from batch {i}")
-                        continue
-
-                    items = []
-                    if isinstance(raw_parsed, dict):
-                        items = raw_parsed.get("products", []) or [raw_parsed]
-                    elif isinstance(raw_parsed, list):
-                        items = raw_parsed
+                    items = raw_parsed if isinstance(raw_parsed, list) else raw_parsed.get("products", [])
+                    if not isinstance(items, list): items = [items]
 
                     for item in items:
                         if not isinstance(item, dict): continue
-                        name = item.get('name') or item.get('product_name')
-                        if not name: continue
                         
-                        raw_price = item.get('price') or item.get('cost')
+                        # Database Safety: Truncate and sanitize
+                        name = str(item.get('name') or item.get('product_name') or 'Unnamed')[:250]
+                        category = str(item.get('category') or 'Uncategorized')[:200]
+                        desc = str(item.get('description') or '')[:1000]
+                        uom = str(item.get('unit_of_measurement') or 'unit')[:50]
+                        
                         try:
+                            raw_price = item.get('price')
                             if isinstance(raw_price, str):
                                 raw_price = raw_price.replace('₹', '').replace('$', '').replace(',', '').strip()
-                            price_val = abs(float(raw_price)) if raw_price is not None else 0.0
+                            price_val = abs(float(raw_price)) if raw_price else 0.0
                         except:
                             price_val = 0.0
 
-                        Product.objects.update_or_create(
-                            name=name,
-                            category=item.get('category', 'Uncategorized'),
-                            defaults={
-                                'description': item.get('description', ''),
-                                'unit_of_measurement': item.get('unit_of_measurement', 'unit'),
-                                'price': price_val
-                            }
-                        )
-                        created_products.append(name)
-                    
-                except Exception as inner_e:
-                    print(f"Error in batch {i}: {str(inner_e)}")
+                        try:
+                            Product.objects.update_or_create(
+                                name=name,
+                                category=category,
+                                defaults={
+                                    'description': desc,
+                                    'unit_of_measurement': uom,
+                                    'price': price_val
+                                }
+                            )
+                            created_products.append(name)
+                        except Exception as db_e:
+                            print(f"DB Error on {name}: {str(db_e)}")
+                            continue
+                            
+                except Exception as batch_e:
+                    print(f"Batch {i} network error: {str(batch_e)}")
                     continue
 
+            # Success response
             return Response({
-                "message": f"Successfully extracted {len(created_products)} products!",
+                "message": f"Successfully processed {len(full_df)} rows!",
+                "extracted_count": len(created_products),
                 "data": created_products
             }, status=status.HTTP_201_CREATED)
             
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return Response({"error": f"Server Error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            err_resp = Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            # FORCE CORS headers even on error to prevent browser block
+            err_resp["Access-Control-Allow-Origin"] = "https://etl-prototype.vercel.app"
+            err_resp["Access-Control-Allow-Credentials"] = "true"
+            return err_resp
