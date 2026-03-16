@@ -101,7 +101,7 @@ def process_file_background(file_path, file_extension):
             )
             proxy_url = os.environ.get("OLLAMA_PROXY_URL", "")
             ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
-            payload = {"model": "smollm:latest", "prompt": prompt, "stream": False, "options": {"temperature": 0.1, "num_predict": 500}}
+            payload = {"model": "deepseek-r1:7b", "prompt": prompt, "stream": False, "options": {"temperature": 0.1, "num_predict": 500}}
 
             res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=120)
             res.raise_for_status()
