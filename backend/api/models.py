@@ -14,3 +14,10 @@ class Product(models.Model):
 
     def __str__(self):
         return self.name
+
+class SchemaCache(models.Model):
+    columns_hash = models.CharField(max_length=255, unique=True)
+    mapping_data = models.JSONField()
+
+    def __str__(self):
+        return f"Cache {self.columns_hash}"
