@@ -34,104 +34,122 @@ def process_file_background(full_df):
     import json
     import re
     from api.models import Product
+    import uuid
+    import pandas as pd
 
     try:
         proxy_url = os.environ.get("OLLAMA_PROXY_URL", "")
         ollama_url = f"{proxy_url.rstrip('/')}/api/generate" if proxy_url else "http://localhost:11434/api/generate"
         
-        created_products = []
-        chunk_size = 2  # Ultra-small chunks so DeepSeek doesn't skip ANY rows
         total_rows = len(full_df)
+        write_status({"status": "processing", "progress": 5, "total": total_rows, "extracted_count": 0})
+        print(f"=== UPLOAD START: {total_rows} rows (Schema Mapping Mode) ===")
         
-        write_status({"status": "processing", "progress": 0, "total": total_rows, "extracted_count": 0})
-        print(f"=== UPLOAD START: {total_rows} rows ===")
+        # 1. Grab first 5 rows for the AI to "peek" at
+        sample_df = full_df.head(5)
+        sample_csv = sample_df.to_csv(index=False)
+        columns_list = list(full_df.columns)
+        
+        prompt = (
+            "You are a schema mapping assistant.\n"
+            f"Here are the columns of a dataset: {columns_list}\n"
+            f"Here is a 5-row sample of the data:\n{sample_csv}\n\n"
+            "Map the raw dataset columns to our exact database fields: "
+            "['name', 'description', 'price', 'unit_of_measurement', 'category'].\n"
+            "If a field cannot be clearly mapped, use null.\n"
+            "Return ONLY a JSON dictionary where the keys are our exact database fields and the values are the raw column names from the dataset. NO EXPLANATIONS. NO THINKING BLOCKS.\n"
+            "Example format: {\"name\": \"Product Title\", \"description\": \"Details\", \"price\": \"Cost\", \"unit_of_measurement\": null, \"category\": \"Dept\"}"
+        )
+        
+        payload = {
+            "model": "deepseek-r1:7b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 500}
+        }
 
-        import uuid
-        for i in range(0, total_rows, chunk_size):
+        print("Sending schema mapping request to DeepSeek...")
+        res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=120)
+        res.raise_for_status()
+        
+        ai_text = res.json().get("response", "")
+        ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
+        
+        # Parse the mapping
+        field_map = {}
+        try:
+            match = re.search(r'\{[^{}]+\}', ai_text)
+            if match:
+                field_map = json.loads(match.group(0))
+            else:
+                field_map = json.loads(ai_text)
+        except Exception as e:
+            print("Failed to parse mapping JSON. Fallback to default/none. Error:", e)
+            
+        print(f"AI Field Map: {field_map}")
+        
+        write_status({"status": "processing", "progress": 20, "total": total_rows, "extracted_count": 0})
+            
+        # 2. Iterate through the dataframe and save
+        created_products = []
+        name_col = field_map.get("name")
+        desc_col = field_map.get("description")
+        price_col = field_map.get("price")
+        uom_col = field_map.get("unit_of_measurement")
+        cat_col = field_map.get("category")
+        
+        batch_size = 50
+        
+        for i, row in full_df.iterrows():
+            if i % batch_size == 0:
+                connection.close() # Close to prevent timeout on long loop
+            
+            # Helper to get value
+            def get_val(col_name, default=""):
+                if col_name and col_name in row and not pd.isna(row[col_name]):
+                    return row[col_name]
+                return default
+
+            raw_name = str(get_val(name_col, "")).strip()
+            if not raw_name or raw_name.lower() in ['unnamed', 'unknown', 'null']:
+                name_val = f"Unnamed Product {uuid.uuid4().hex[:6]}"
+            else:
+                name_val = raw_name[:250]
+                
             try:
-                connection.close() 
-                chunk = full_df.iloc[i:i + chunk_size]
-                chunk_csv = chunk.to_csv(index=False)
+                price_raw = str(get_val(price_col, "0"))
+                price_raw = price_raw.replace('₹', '').replace('$', '').replace(',', '').strip()
+                price_val = float(price_raw) if price_raw else 0.0
+            except:
+                price_val = 0.0
+
+            desc_val = str(get_val(desc_col, ""))
+            if desc_val == 'None' or desc_val.lower() == 'null': desc_val = ""
                 
-                percent = round((i / total_rows) * 100)
-                write_status({"status": "processing", "progress": percent, "total": total_rows, "extracted_count": len(created_products)})
+            uom_val = str(get_val(uom_col, "unit"))
+            if uom_val == 'None' or uom_val.lower() == 'null': uom_val = "unit"
                 
-                prompt = (
-                    "### Task: Convert CSV to JSON array of product objects.\n"
-                    "### Schema: [{\"name\":\"...\",\"description\":\"...\",\"unit_of_measurement\":\"...\",\"price\":0.0,\"category\":\"...\"}]\n"
-                    "### Rules: NO preamble. NO thinking blocks. ONLY the JSON list.\n"
-                    f"### Data:\n{chunk_csv}"
-                )
-                
-                payload = {
-                    "model": "deepseek-r1:7b",
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 1000}
+            cat_val = str(get_val(cat_col, "Uncategorized"))
+            if cat_val == 'None' or cat_val.lower() == 'null': cat_val = "Uncategorized"
+
+            Product.objects.update_or_create(
+                name=name_val,
+                defaults={
+                    'description': desc_val[:1000],
+                    'unit_of_measurement': uom_val[:50],
+                    'price': price_val,
+                    'category': cat_val[:200],
                 }
-
-                res = requests.post(ollama_url, json=payload, headers={"bypass-tunnel-reminder": "true", "ngrok-skip-browser-warning": "true"}, timeout=90)
-                if res.status_code != 200: continue
-
-                ai_text = res.json().get("response", "")
-                ai_text = re.sub(r'<think>.*?</think>', '', ai_text, flags=re.DOTALL).strip()
-                
-                items = []
-                try:
-                    # Ask the standard parser to attempt reading the json
-                    raw_parsed = json.loads(ai_text)
-                    if isinstance(raw_parsed, list):
-                        items = raw_parsed
-                    elif isinstance(raw_parsed, dict):
-                        # Some models return {"products": [...]} while others just return a single item {...}
-                        if "products" in raw_parsed and isinstance(raw_parsed["products"], list):
-                            items = raw_parsed["products"]
-                        else:
-                            items = [raw_parsed] # It just returned one product as a dict!
-                except Exception:
-                    # ROBUST FALLBACK: Rip out every single {...} object manually
-                    for block in re.finditer(r'\{[^{}]+\}', ai_text):
-                        try:
-                            parsed_block = json.loads(block.group(0))
-                            # Ignore empty or generic wrapper dicts
-                            if parsed_block and "name" in parsed_block or "price" in parsed_block:
-                                items.append(parsed_block)
-                        except: pass
-
-                for item in items:
-                    if not isinstance(item, dict): continue
-                    
-                    raw_name = str(item.get('name') or item.get('product_name') or '').strip()
-                    if not raw_name or raw_name.lower() in ['unnamed', 'unknown', 'null']:
-                        name_val = f"Unnamed Product {uuid.uuid4().hex[:6]}"
-                    else:
-                        name_val = raw_name[:250]
-                    
-                    try:
-                        price_raw = item.get('price')
-                        if isinstance(price_raw, str):
-                            price_raw = price_raw.replace('₹', '').replace('$', '').replace(',', '').strip()
-                        price_val = float(price_raw) if price_raw else 0.0
-                    except:
-                        price_val = 0.0
-
-                    Product.objects.update_or_create(
-                        name=name_val,
-                        defaults={
-                            'description': str(item.get('description', ''))[:1000],
-                            'unit_of_measurement': str(item.get('unit_of_measurement', 'unit'))[:50],
-                            'price': price_val,
-                            'category': str(item.get('category', 'Uncategorized'))[:200],
-                        }
-                    )
-                    created_products.append(name_val)
-                    
-            except Exception as e:
-                print(f"Batch failed: {str(e)}")
-                continue
+            )
+            created_products.append(name_val)
+            
+            # Update status occasionally
+            if i % batch_size == 0 and i > 0:
+                percent = 20 + round((i / total_rows) * 80)
+                write_status({"status": "processing", "progress": percent, "total": total_rows, "extracted_count": len(created_products)})
 
         write_status({"status": "completed", "progress": 100, "total": total_rows, "extracted_count": len(created_products)})
-        print(f"=== UPLOAD COMPLETE: {len(created_products)} products saved ===")
+        print(f"=== UPLOAD COMPLETE: {len(created_products)} products saved using Schema Mapping Mode! ===")
 
     except Exception as e:
         write_status({"status": "error", "error": f"Fatal Crash: {str(e)}"})
