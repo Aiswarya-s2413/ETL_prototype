@@ -98,12 +98,9 @@ def process_file_background(full_df):
         uom_col = field_map.get("unit_of_measurement")
         cat_col = field_map.get("category")
         
-        batch_size = 50
-        
+        products_to_create = []
+
         for i, row in full_df.iterrows():
-            if i % batch_size == 0:
-                connection.close() # Close to prevent timeout on long loop
-            
             # Helper to get value
             def get_val(col_name, default=""):
                 if col_name and col_name in row and not pd.isna(row[col_name]):
@@ -132,24 +129,31 @@ def process_file_background(full_df):
             cat_val = str(get_val(cat_col, "Uncategorized"))
             if cat_val == 'None' or cat_val.lower() == 'null': cat_val = "Uncategorized"
 
-            Product.objects.update_or_create(
-                name=name_val,
-                defaults={
-                    'description': desc_val[:1000],
-                    'unit_of_measurement': uom_val[:50],
-                    'price': price_val,
-                    'category': cat_val[:200],
-                }
+            products_to_create.append(
+                Product(
+                    name=name_val,
+                    description=desc_val[:1000],
+                    unit_of_measurement=uom_val[:50],
+                    price=price_val,
+                    category=cat_val[:200]
+                )
             )
             created_products.append(name_val)
             
-            # Update status occasionally
-            if i % batch_size == 0 and i > 0:
-                percent = 20 + round((i / total_rows) * 80)
+            # Update status occasionally for UI via quick batches
+            if i % 500 == 0 and i > 0:
+                percent = 20 + round((i / total_rows) * 75)
                 write_status({"status": "processing", "progress": percent, "total": total_rows, "extracted_count": len(created_products)})
 
+        # Now execute the mega fast Bulk Create
+        write_status({"status": "processing", "progress": 95, "total": total_rows, "extracted_count": len(created_products)})
+        
+        # We close existing connection to prevent "Server has gone away" error if the parsing loop took a few seconds
+        connection.close() 
+        Product.objects.bulk_create(products_to_create, batch_size=500, ignore_conflicts=True)
+
         write_status({"status": "completed", "progress": 100, "total": total_rows, "extracted_count": len(created_products)})
-        print(f"=== UPLOAD COMPLETE: {len(created_products)} products saved using Schema Mapping Mode! ===")
+        print(f"=== UPLOAD COMPLETE: {len(created_products)} products saved using schema bulk mode! ===")
 
     except Exception as e:
         write_status({"status": "error", "error": f"Fatal Crash: {str(e)}"})
