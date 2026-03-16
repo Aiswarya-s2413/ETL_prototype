@@ -62,7 +62,7 @@ def process_file_background(full_df):
         )
         
         payload = {
-            "model": "deepseek-r1:7b",
+            "model": "smollm:latest",
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": 0.1, "num_predict": 500}
